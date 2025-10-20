@@ -9,6 +9,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/nextcloud-aio-images"
 LOG_FILE="${OUTPUT_DIR}/download.log"
+DIGEST_CACHE_FILE="${OUTPUT_DIR}/image-digests.cache"
 
 # 创建输出目录
 mkdir -p "${OUTPUT_DIR}"
@@ -76,11 +77,72 @@ if ! docker info &> /dev/null; then
     exit 1
 fi
 
+# 获取镜像摘要
+get_image_digest() {
+    local image_url="$1"
+    docker inspect "${image_url}" --format='{{index .RepoDigests 0}}' 2>/dev/null | cut -d'@' -f2
+}
+
+# 获取缓存的镜像摘要
+get_cached_digest() {
+    local image_name="$1"
+    if [[ -f "${DIGEST_CACHE_FILE}" ]]; then
+        grep "^${image_name}:" "${DIGEST_CACHE_FILE}" 2>/dev/null | cut -d':' -f2-
+    fi
+}
+
+# 保存镜像摘要到缓存
+save_digest_to_cache() {
+    local image_name="$1"
+    local digest="$2"
+    
+    # 创建缓存文件目录
+    mkdir -p "$(dirname "${DIGEST_CACHE_FILE}")"
+    
+    # 移除旧的记录（如果存在）
+    if [[ -f "${DIGEST_CACHE_FILE}" ]]; then
+        grep -v "^${image_name}:" "${DIGEST_CACHE_FILE}" > "${DIGEST_CACHE_FILE}.tmp" 2>/dev/null || true
+        mv "${DIGEST_CACHE_FILE}.tmp" "${DIGEST_CACHE_FILE}"
+    fi
+    
+    # 添加新记录
+    echo "${image_name}:${digest}" >> "${DIGEST_CACHE_FILE}"
+}
+
 # 下载镜像函数
 download_image() {
     local image_name="$1"
     local image_url="$2"
     local tar_file="${OUTPUT_DIR}/${image_name}.tar"
+    
+    # 检查缓存的摘要
+    local cached_digest
+    cached_digest=$(get_cached_digest "${image_name}")
+    
+    # 如果tar文件存在且有缓存摘要，先尝试检查更新
+    if [[ -f "${tar_file}" ]] && [[ -n "${cached_digest}" ]]; then
+        log "正在检查镜像更新: ${image_url}"
+        
+        # 尝试拉取最新镜像信息
+        if docker pull "${image_url}" >/dev/null 2>&1; then
+            # 获取当前镜像摘要
+            local current_digest
+            current_digest=$(get_image_digest "${image_url}")
+            
+            if [[ -n "${current_digest}" ]] && [[ "${current_digest}" == "${cached_digest}" ]]; then
+                log "镜像未更新，跳过下载: ${image_url} (摘要: ${current_digest})"
+                return 0
+            elif [[ -n "${current_digest}" ]]; then
+                log "检测到镜像更新: ${image_url}"
+                log "  旧摘要: ${cached_digest}"
+                log "  新摘要: ${current_digest}"
+            fi
+        else
+            log "警告: 无法检查镜像更新，将重新下载: ${image_url}"
+        fi
+    else
+        log "正在检查镜像: ${image_url}"
+    fi
     
     log "正在下载镜像: ${image_url}"
     
@@ -88,22 +150,19 @@ download_image() {
     if docker pull "${image_url}"; then
         log "成功拉取镜像: ${image_url}"
         
+        # 获取镜像摘要
+        local current_digest
+        current_digest=$(get_image_digest "${image_url}")
+        
         # 保存镜像为tar文件
         log "正在保存镜像到: ${tar_file}"
         if docker save "${image_url}" -o "${tar_file}"; then
             log "成功保存镜像: ${tar_file}"
             
-            # 压缩tar文件以节省空间
-            log "正在压缩镜像文件..."
-            # 如果压缩文件已存在，先删除
-            if [[ -f "${tar_file}.gz" ]]; then
-                rm -f "${tar_file}.gz"
-            fi
-            
-            if gzip "${tar_file}"; then
-                log "成功压缩镜像文件: ${tar_file}.gz"
-            else
-                log "警告: 压缩失败，保留原始tar文件"
+            # 保存摘要到缓存
+            if [[ -n "${current_digest}" ]]; then
+                save_digest_to_cache "${image_name}" "${current_digest}"
+                log "已缓存镜像摘要: ${current_digest:0:12}..."
             fi
         else
             log "错误: 保存镜像失败: ${image_url}"
@@ -261,21 +320,7 @@ if ! docker info &> /dev/null; then
     exit 1
 fi
 
-# 加载所有镜像文件
-for file in "${SCRIPT_DIR}"/*.tar.gz; do
-    if [[ -f "$file" ]]; then
-        echo "正在加载镜像: $(basename "$file")"
-        
-        # 解压并加载
-        if gunzip -c "$file" | docker load; then
-            echo "成功加载: $(basename "$file")"
-        else
-            echo "错误: 加载失败: $(basename "$file")"
-        fi
-    fi
-done
-
-# 检查未压缩的tar文件
+# 加载所有tar镜像文件
 for file in "${SCRIPT_DIR}"/*.tar; do
     if [[ -f "$file" ]]; then
         echo "正在加载镜像: $(basename "$file")"
