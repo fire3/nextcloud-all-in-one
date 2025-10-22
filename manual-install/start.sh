@@ -258,6 +258,17 @@ start_optional_containers() {
             fi
         fi
         
+        # 检查CA证书目录是否存在
+        local ca_mount_options=""
+        if [ -n "$NEXTCLOUD_TRUSTED_CACERTS_DIR" ] && [ -d "$NEXTCLOUD_TRUSTED_CACERTS_DIR" ]; then
+            log "检测到CA证书目录: $NEXTCLOUD_TRUSTED_CACERTS_DIR"
+            log "将CA证书挂载到OnlyOffice容器的 /var/www/onlyoffice/Data/certs 目录"
+            ca_mount_options="-v $NEXTCLOUD_TRUSTED_CACERTS_DIR:/var/www/onlyoffice/Data/certs:ro"
+        elif [ -n "$NEXTCLOUD_TRUSTED_CACERTS_DIR" ]; then
+            warn "配置的CA证书目录不存在: $NEXTCLOUD_TRUSTED_CACERTS_DIR"
+            warn "OnlyOffice将不会加载自定义CA证书"
+        fi
+        
         docker run -d \
             --name nextcloud-aio-onlyoffice \
             --network nextcloud-aio \
@@ -265,7 +276,7 @@ start_optional_containers() {
             --restart unless-stopped \
             --cap-drop NET_RAW \
             -v nextcloud_aio_onlyoffice:/var/lib/onlyoffice:rw \
-            -v "$NEXTCLOUD_TRUSTED_CACERTS_DIR":/mnt/ca-certificates:ro \
+            $ca_mount_options \
             -e JWT_ENABLED=true \
             -e JWT_HEADER=AuthorizationJwt \
             -e JWT_SECRET="$ONLYOFFICE_SECRET" \
