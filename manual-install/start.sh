@@ -93,7 +93,9 @@ create_volumes() {
     
     # 根据启用的功能添加额外的卷
     [ "$CLAMAV_ENABLED" = "yes" ] && volumes+=("nextcloud_aio_clamav")
+    [ "$ONLYOFFICE_ENABLED" = "yes" ] && volumes+=("nextcloud_aio_onlyoffice")
     [ "$FULLTEXTSEARCH_ENABLED" = "yes" ] && volumes+=("nextcloud_aio_elasticsearch")
+    [ "$TALK_RECORDING_ENABLED" = "yes" ] && volumes+=("nextcloud_aio_talk_recording")
     
     for volume in "${volumes[@]}"; do
         if ! docker volume inspect "$volume" &> /dev/null; then
@@ -239,16 +241,36 @@ start_optional_containers() {
     # OnlyOffice
     if [ "$ONLYOFFICE_ENABLED" = "yes" ]; then
         log "启动OnlyOffice容器..."
+        
+        # 确定使用的镜像
+        local onlyoffice_image="ghcr.io/nextcloud-releases/aio-onlyoffice:latest"
+        if [ -n "$ONLYOFFICE_CUSTOM_IMAGE" ]; then
+            onlyoffice_image="$ONLYOFFICE_CUSTOM_IMAGE"
+            log "使用自定义OnlyOffice镜像: $onlyoffice_image"
+        fi
+        
+        # 检查镜像是否存在
+        if ! docker image inspect "$onlyoffice_image" &> /dev/null; then
+            warn "OnlyOffice镜像不存在: $onlyoffice_image"
+            if [ -n "$ONLYOFFICE_CUSTOM_IMAGE" ]; then
+                error "自定义镜像不存在，请先运行 ./modify-onlyoffice-image.sh 创建自定义镜像"
+                exit 1
+            fi
+        fi
+        
         docker run -d \
             --name nextcloud-aio-onlyoffice \
             --network nextcloud-aio \
             --init \
             --restart unless-stopped \
             --cap-drop NET_RAW \
+            -v nextcloud_aio_onlyoffice:/var/lib/onlyoffice:rw \
+            -v "$NEXTCLOUD_TRUSTED_CACERTS_DIR":/mnt/ca-certificates:ro \
             -e JWT_ENABLED=true \
+            -e JWT_HEADER=AuthorizationJwt \
             -e JWT_SECRET="$ONLYOFFICE_SECRET" \
             -e TZ="$TIMEZONE" \
-            ghcr.io/nextcloud-releases/aio-onlyoffice:latest
+            "$onlyoffice_image"
     fi
     
     # Talk
